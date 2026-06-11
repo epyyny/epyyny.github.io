@@ -92,16 +92,20 @@
           uniform sampler2D tDiffuse;
           uniform float k1;
           uniform float k2;
+          uniform vec2  leftLensCenter;
+          uniform vec2  rightLensCenter;
+          uniform float aspectCorrection;
           varying vec2 vUv;
 
           vec2 barrelUV(vec2 uv, vec2 lensCenter) {
             vec2 p = uv - lensCenter;
-            p.x *= 2.0;
+            // Scale x so that equal values of p.x and p.y represent equal
+            // physical distances on screen (screen is wider than tall).
+            p.x *= aspectCorrection;
             float r2 = dot(p, p);
             float r4 = r2 * r2;
-            float dist = 1.0 + k1 * r2 + k2 * r4;
-            p *= dist;
-            p.x /= 2.0;
+            p *= 1.0 + k1 * r2 + k2 * r4;
+            p.x /= aspectCorrection;
             return p + lensCenter;
           }
 
@@ -110,12 +114,12 @@
             vec2 s;
 
             if (uv.x < 0.5) {
-              s = barrelUV(uv, vec2(0.25, 0.5));
+              s = barrelUV(uv, leftLensCenter);
               if (s.x < 0.0 || s.x > 0.5 || s.y < 0.0 || s.y > 1.0) {
                 gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
               }
             } else {
-              s = barrelUV(uv, vec2(0.75, 0.5));
+              s = barrelUV(uv, rightLensCenter);
               if (s.x < 0.5 || s.x > 1.0 || s.y < 0.0 || s.y > 1.0) {
                 gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
               }
@@ -127,9 +131,12 @@
 
         this.distortMat = new THREE.ShaderMaterial({
           uniforms: {
-            tDiffuse: { value: this.renderTarget.texture },
-            k1:       { value: this.data.k1 },
-            k2:       { value: this.data.k2 },
+            tDiffuse:         { value: this.renderTarget.texture },
+            k1:               { value: this.data.k1 },
+            k2:               { value: this.data.k2 },
+            leftLensCenter:   { value: new THREE.Vector2(0.25, 0.5) },
+            rightLensCenter:  { value: new THREE.Vector2(0.75, 0.5) },
+            aspectCorrection: { value: size.x / size.y },
           },
           vertexShader:   vert,
           fragmentShader: frag,
@@ -191,12 +198,46 @@
         const size = new THREE.Vector2();
         this.el.renderer.getSize(size);
         this.renderTarget.setSize(size.x, size.y);
+        if (this.distortMat) {
+          this.distortMat.uniforms.aspectCorrection.value = size.x / size.y;
+          // Recompute lens centres if we have calibration data stored
+          if (this._calibration) this._applyLensCentres(size);
+        }
       },
 
-      activate(ipd, k1, k2) {
+      // Compute and push lens-centre uniforms from physical calibration data.
+      // size: THREE.Vector2 of renderer physical pixels.
+      _applyLensCentres(size) {
+        const { savedDPI, interLensDist, trayToLensDist } = this._calibration;
+        const pxPerM   = savedDPI / 0.0254;          // physical px → metres
+        const screenW  = size.x / pxPerM;            // screen width in metres
+        const screenH  = size.y / pxPerM;            // screen height in metres
+
+        // Horizontal: each lens is half-IPD from the screen's horizontal centre
+        const halfIpd = interLensDist / 2;
+        const leftX   = 0.5 - halfIpd / screenW;
+        const rightX  = 0.5 + halfIpd / screenW;
+
+        // Vertical: tray_to_lens_distance from the bottom edge of the screen
+        const lensY   = Math.max(0.1, Math.min(0.9, trayToLensDist / screenH));
+
+        this.distortMat.uniforms.leftLensCenter.value.set(leftX,  lensY);
+        this.distortMat.uniforms.rightLensCenter.value.set(rightX, lensY);
+      },
+
+      activate(ipd, k1, k2, savedDPI, trayToLensDist) {
         if (ipd && ipd > 0) { this.data.ipd = ipd; this.stereoCamera.eyeSep = ipd; }
         if (k1 != null && this.distortMat) this.distortMat.uniforms.k1.value = k1;
         if (k2 != null && this.distortMat) this.distortMat.uniforms.k2.value = k2;
+
+        if (savedDPI > 0 && this.distortMat) {
+          this._calibration = { savedDPI, interLensDist: ipd, trayToLensDist };
+          const size = new THREE.Vector2();
+          this.el.renderer.getSize(size);
+          this.distortMat.uniforms.aspectCorrection.value = size.x / size.y;
+          this._applyLensCentres(size);
+        }
+
         this._active = true;
       },
 
@@ -399,7 +440,8 @@
 <button id="exit-btn" onclick="exitVR()">Exit VR</button>
 
 <script>
-  const qrParams = decodeCardboardParams(localStorage.getItem('cardboardParams') || '');
+  const savedDPI  = parseFloat(localStorage.getItem('savedDPI')) || 0;
+  const qrParams  = decodeCardboardParams(localStorage.getItem('cardboardParams') || '');
 
   async function enterVR() {
     if (typeof DeviceOrientationEvent !== 'undefined' &&
@@ -423,7 +465,9 @@
     stereoSys.activate(
       qrParams.interLensDist,
       qrParams.distortionCoeffs[0],
-      qrParams.distortionCoeffs[1]
+      qrParams.distortionCoeffs[1],
+      savedDPI,
+      qrParams.trayToLensDist
     );
   }
 
