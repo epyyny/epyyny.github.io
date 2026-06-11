@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Step 1 — Screen Calibration</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f0f0f;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 20px 20px 0;
+    }
+    .step-label {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #666;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin-top: 4px;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #888;
+      margin-top: 6px;
+      line-height: 1.5;
+    }
+
+    /* Mode tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      padding: 16px 20px 0;
+    }
+    .tab {
+      flex: 1;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: transparent;
+      color: #888;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .tab.active {
+      background: #1a1a1a;
+      border-color: #555;
+      color: #fff;
+    }
+
+    /* Reference display area */
+    .ref-area {
+      flex: 1;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      overflow: hidden;
+    }
+
+    .instruction {
+      font-size: 12px;
+      color: #666;
+      text-align: center;
+    }
+
+    /* Ruler mode */
+    .ruler-scroll {
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    #ruler-img {
+      display: block;
+      height: 60px;
+      /* width set by JS */
+    }
+
+    /* Credit card mode */
+    #card-rect {
+      height: 54px; /* fixed card height, width is adjustable */
+      background: #1e1e1e;
+      border: 2px solid #4a9eff;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #4a9eff;
+      font-size: 11px;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+      /* width set by JS */
+    }
+
+    /* Controls */
+    .controls {
+      padding: 0 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .dpi-display {
+      text-align: center;
+      font-size: 13px;
+      color: #888;
+    }
+    .dpi-display span {
+      color: #4a9eff;
+      font-weight: 600;
+      font-size: 16px;
+    }
+
+    .adjust-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .adjust-row label {
+      font-size: 11px;
+      color: #555;
+      width: 32px;
+    }
+    .btn-group {
+      display: flex;
+      gap: 6px;
+      flex: 1;
+    }
+    .adj-btn {
+      flex: 1;
+      height: 44px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      font-size: 18px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.1s;
+      user-select: none;
+    }
+    .adj-btn:active { background: #2a2a2a; }
+
+    .confirm-btn {
+      width: 100%;
+      height: 52px;
+      border-radius: 10px;
+      border: none;
+      background: #4a9eff;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 4px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .confirm-btn:active { opacity: 0.85; }
+
+    .bottom-pad { height: 24px; }
+
+    /* hide card-rect or ruler based on mode */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="step-label">Step 1 of 3</div>
+  <h1>Screen Calibration</h1>
+  <p class="subtitle">
+    Adjust the image until it matches the physical object held against your screen.
+  </p>
+</header>
+
+<div class="tabs">
+  <button class="tab active" id="tab-ruler" onclick="setMode('ruler')">124mm Ruler</button>
+  <button class="tab" id="tab-card" onclick="setMode('card')">Credit Card</button>
+</div>
+
+<div class="ref-area">
+  <!-- Ruler mode -->
+  <p class="instruction" id="instr-ruler">Place a physical ruler along the top edge</p>
+  <div class="ruler-scroll" id="ruler-scroll">
+    <img id="ruler-img" src="assets/ruler_image.png" alt="Ruler">
+  </div>
+
+  <!-- Credit card mode -->
+  <p class="instruction hidden" id="instr-card">Place a credit card behind your screen against the image</p>
+  <div id="card-rect" class="hidden">CREDIT CARD</div>
+</div>
+
+<div class="controls">
+  <div class="dpi-display">DPI: <span id="dpi-val">—</span></div>
+
+  <div class="adjust-row">
+    <label>Fine</label>
+    <div class="btn-group">
+      <button class="adj-btn" id="btn-dec1" ontouchstart="startRepeat('dec',1)" ontouchend="stopRepeat()" onmousedown="startRepeat('dec',1)" onmouseup="stopRepeat()">−</button>
+      <button class="adj-btn" id="btn-inc1" ontouchstart="startRepeat('inc',1)" ontouchend="stopRepeat()" onmousedown="startRepeat('inc',1)" onmouseup="stopRepeat()">+</button>
+    </div>
+  </div>
+
+  <div class="adjust-row">
+    <label>Coarse</label>
+    <div class="btn-group">
+      <button class="adj-btn" ontouchstart="startRepeat('dec',10)" ontouchend="stopRepeat()" onmousedown="startRepeat('dec',10)" onmouseup="stopRepeat()">−−</button>
+      <button class="adj-btn" ontouchstart="startRepeat('inc',10)" ontouchend="stopRepeat()" onmousedown="startRepeat('inc',10)" onmouseup="stopRepeat()">++</button>
+    </div>
+  </div>
+
+  <button class="confirm-btn" onclick="confirm()">Confirm & Continue →</button>
+</div>
+
+<div class="bottom-pad"></div>
+
+<script>
+  // --- Constants matching DPICalculator.cs ---
+  const RULER_MM    = 124;
+  const CARD_MM     = 85.6;
+  const RULER_IN    = RULER_MM / 25.4;   // 4.882"
+  const CARD_IN     = CARD_MM  / 25.4;   // 3.370"
+  const DPR         = window.devicePixelRatio || 1;
+  const STEP_FINE   = 2;   // matching ScaleRuler.cs widthStep = 2f
+  const STEP_COARSE = 10;
+
+  let mode = 'ruler';       // 'ruler' | 'card'
+  let rulerCSSWidth = 0;    // current CSS width in px
+  let cardCSSWidth  = 0;
+  let repeatTimer   = null;
+
+  // Estimate a reasonable starting width from devicePixelRatio & screen size
+  function estimateStartWidth(mm) {
+    // Best-guess DPI based on pixel density hint; user adjusts from here
+    const guessPhysicalPPI = 160 * DPR; // rough approximation
+    return Math.round((mm / 25.4) * (guessPhysicalPPI / DPR));
+  }
+
+  function init() {
+    const savedRuler = parseFloat(localStorage.getItem('rulerWidth_ruler'));
+    const savedCard  = parseFloat(localStorage.getItem('rulerWidth_card'));
+
+    rulerCSSWidth = (savedRuler > 0) ? savedRuler : estimateStartWidth(RULER_MM);
+    cardCSSWidth  = (savedCard  > 0) ? savedCard  : estimateStartWidth(CARD_MM);
+
+    applyWidths();
+    recalcDPI();
+  }
+
+  function applyWidths() {
+    document.getElementById('ruler-img').style.width  = rulerCSSWidth + 'px';
+    document.getElementById('card-rect').style.width  = cardCSSWidth  + 'px';
+  }
+
+  function recalcDPI() {
+    const w   = (mode === 'ruler') ? rulerCSSWidth : cardCSSWidth;
+    const ref = (mode === 'ruler') ? RULER_IN      : CARD_IN;
+    const dpi = (w * DPR) / ref;
+    document.getElementById('dpi-val').textContent = dpi.toFixed(1);
+    localStorage.setItem('savedDPI', dpi.toFixed(2));
+    if (mode === 'ruler') localStorage.setItem('rulerWidth_ruler', rulerCSSWidth);
+    else                  localStorage.setItem('rulerWidth_card',  cardCSSWidth);
+  }
+
+  function adjust(dir, step) {
+    const delta = (dir === 'inc') ? step : -step;
+    if (mode === 'ruler') rulerCSSWidth = Math.max(10, rulerCSSWidth + delta);
+    else                  cardCSSWidth  = Math.max(10, cardCSSWidth  + delta);
+    applyWidths();
+    recalcDPI();
+  }
+
+  // Hold-to-repeat
+  function startRepeat(dir, step) {
+    adjust(dir, step);
+    repeatTimer = setInterval(() => adjust(dir, step), 80);
+  }
+  function stopRepeat() {
+    clearInterval(repeatTimer);
+    repeatTimer = null;
+  }
+
+  function setMode(m) {
+    mode = m;
+    document.getElementById('tab-ruler').classList.toggle('active', m === 'ruler');
+    document.getElementById('tab-card').classList.toggle('active',  m === 'card');
+    document.getElementById('ruler-scroll').classList.toggle('hidden', m !== 'ruler');
+    document.getElementById('instr-ruler').classList.toggle('hidden',  m !== 'ruler');
+    document.getElementById('card-rect').classList.toggle('hidden',   m !== 'card');
+    document.getElementById('instr-card').classList.toggle('hidden',  m !== 'card');
+    recalcDPI();
+  }
+
+  function confirm() {
+    const dpi = parseFloat(localStorage.getItem('savedDPI'));
+    if (!dpi || dpi <= 0) { alert('Please calibrate first.'); return; }
+    window.location.href = 'qr-scan.html';
+  }
+
+  init();
+</script>
+</body>
+</html>

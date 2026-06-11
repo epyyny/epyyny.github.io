@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>VR Scene</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+
+    a-scene {
+      position: fixed; inset: 0;
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    /* ── Pre-VR overlay ─────────────────────────────────────────── */
+    #overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,0.92);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 28px; gap: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #e0e0e0;
+    }
+    .step-label {
+      font-size: 11px; letter-spacing: 0.12em;
+      text-transform: uppercase; color: #555;
+    }
+    #overlay h1 { font-size: 24px; font-weight: 600; }
+
+    .cal-row {
+      display: flex; justify-content: space-between; align-items: center;
+      width: 100%; max-width: 340px;
+      padding: 10px 14px; background: #1a1a1a; border-radius: 8px; font-size: 13px;
+    }
+    .cal-row .lbl { color: #666; }
+    .ok   { color: #4caf50; font-weight: 500; }
+    .warn { color: #ff9800; font-weight: 500; }
+
+    .hint {
+      font-size: 12px; color: #555; text-align: center;
+      line-height: 1.7; max-width: 300px;
+    }
+
+    #enter-btn {
+      margin-top: 8px; width: 100%; max-width: 340px; height: 56px;
+      border-radius: 14px; border: none;
+      background: #4a9eff; color: #fff;
+      font-size: 18px; font-weight: 700; cursor: pointer;
+    }
+    #enter-btn:active { opacity: 0.85; }
+
+    #recal-btn {
+      width: 100%; max-width: 340px; height: 40px;
+      border-radius: 10px; border: 1px solid #2a2a2a;
+      background: transparent; color: #555; font-size: 13px; cursor: pointer;
+    }
+
+    /* ── Exit button (shown in stereo mode) ─────────────────────── */
+    #exit-btn {
+      position: fixed; bottom: 20px; left: 50%;
+      transform: translateX(-50%); z-index: 200;
+      padding: 10px 24px; border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.2);
+      background: rgba(0,0,0,0.65); color: #fff;
+      font-size: 13px; font-family: -apple-system, sans-serif;
+      cursor: pointer; display: none;
+    }
+
+    /* divider line in stereo mode */
+    #divider {
+      position: fixed; top: 0; bottom: 0; left: 50%;
+      width: 2px; background: #111;
+      display: none; z-index: 50;
+      transform: translateX(-50%);
+    }
+  </style>
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <!-- aframe-stereo-component: layer-based eye assignment -->
+  <script src="https://cdn.jsdelivr.net/npm/aframe-stereo-component/dist/aframe-stereo-component.min.js"></script>
+
+  <script>
+    // ── Manual stereo + barrel distortion render system ──────────────────
+    //
+    // Pipeline:
+    //   1. Render scene (left eye | right eye) → off-screen WebGLRenderTarget
+    //   2. Full-screen distortion pass → screen
+    //
+    // The barrel distortion shader pre-distorts each eye half with pincushion
+    // distortion so that after passing through the Cardboard lens (which applies
+    // barrel distortion), the image appears undistorted.
+    //
+    // k1 / k2 are the viewer's barrel distortion coefficients.
+    // Defaults match the generic Google Cardboard v1 profile.
+    // They can be overridden in activate() once decoded from the QR protobuf.
+
+    AFRAME.registerSystem('manual-stereo', {
+      schema: {
+        ipd: { type: 'number', default: 0.064 },  // metres
+        k1:  { type: 'number', default: 0.441 },  // barrel coeff 1 (Cardboard default)
+        k2:  { type: 'number', default: 0.156 },  // barrel coeff 2 (Cardboard default)
+      },
+
+      init() {
+        this._active      = false;
+        this._origRender  = null;
+        this.stereoCamera = new THREE.StereoCamera();
+        this.renderTarget = null;
+        this.distortScene = null;
+        this.distortCam   = null;
+        this.distortMat   = null;
+
+        this.el.addEventListener('loaded', () => {
+          this._buildDistortionPass();
+          this._patchRenderer();
+        });
+
+        window.addEventListener('resize', () => this._onResize());
+      },
+
+      // ── Build the off-screen render target and distortion quad ──────────
+      _buildDistortionPass() {
+        const renderer = this.el.renderer;
+        const size     = new THREE.Vector2();
+        renderer.getSize(size);
+
+        this.renderTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+
+        // Vertex shader — passes UVs straight through
+        const vert = `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `;
+
+        // Fragment shader — barrel (pincushion pre-correction) per eye half
+        //
+        // For each output pixel we compute where in the render target to sample.
+        // The forward barrel formula  r' = r*(1 + k1*r² + k2*r⁴)  moves the
+        // sample point outward, which compresses the image inward on screen
+        // (pincushion distortion).  The Cardboard lens then expands it back to
+        // look undistorted.
+        //
+        // Aspect ratio of each eye half is corrected so distortion is circular,
+        // not elliptical.
+        const frag = `
+          precision mediump float;
+          uniform sampler2D tDiffuse;
+          uniform float k1;
+          uniform float k2;
+          varying vec2 vUv;
+
+          vec2 barrelUV(vec2 uv, vec2 lensCenter) {
+            // Normalise to [-1, 1] centred on the lens, with aspect correction
+            // (each eye half is approx half the screen width × full height)
+            vec2 p = uv - lensCenter;
+            p.x *= 2.0;            // correct for ~0.5 aspect of each eye half
+
+            float r2 = dot(p, p);
+            float r4 = r2 * r2;
+            float dist = 1.0 + k1 * r2 + k2 * r4;
+
+            p *= dist;
+            p.x /= 2.0;
+            return p + lensCenter;
+          }
+
+          void main() {
+            vec2 uv = vUv;
+            vec2 s;
+
+            if (uv.x < 0.5) {
+              s = barrelUV(uv, vec2(0.25, 0.5));
+              // black outside the left eye region
+              if (s.x < 0.0 || s.x > 0.5 || s.y < 0.0 || s.y > 1.0) {
+                gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
+              }
+            } else {
+              s = barrelUV(uv, vec2(0.75, 0.5));
+              // black outside the right eye region
+              if (s.x < 0.5 || s.x > 1.0 || s.y < 0.0 || s.y > 1.0) {
+                gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
+              }
+            }
+
+            gl_FragColor = texture2D(tDiffuse, s);
+          }
+        `;
+
+        this.distortMat = new THREE.ShaderMaterial({
+          uniforms: {
+            tDiffuse: { value: this.renderTarget.texture },
+            k1:       { value: this.data.k1 },
+            k2:       { value: this.data.k2 },
+          },
+          vertexShader:   vert,
+          fragmentShader: frag,
+        });
+
+        const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.distortMat);
+        this.distortScene = new THREE.Scene();
+        this.distortScene.add(quad);
+        this.distortCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      },
+
+      // ── Patch renderer.render once ───────────────────────────────────────
+      _patchRenderer() {
+        const renderer = this.el.renderer;
+        const self     = this;
+        const orig     = renderer.render.bind(renderer);
+        this._origRender = orig;
+
+        renderer.render = function(scene, camera) {
+          if (!self._active) { orig(scene, camera); return; }
+          self._drawStereo(scene, camera);
+        };
+      },
+
+      // ── Two-pass stereo draw ─────────────────────────────────────────────
+      _drawStereo(scene, camera) {
+        const renderer     = this.el.renderer;
+        const stereoCamera = this.stereoCamera;
+
+        stereoCamera.eyeSep = this.data.ipd;
+        stereoCamera.update(camera);
+
+        const size = new THREE.Vector2();
+        renderer.getSize(size);
+        const w = Math.floor(size.x / 2);
+        const h = size.y;
+
+        // Pass 1: render both eyes into the off-screen render target
+        renderer.setRenderTarget(this.renderTarget);
+        renderer.autoClear = false;
+        renderer.clear();
+        renderer.setScissorTest(true);
+
+        renderer.setViewport(0, 0, w, h);
+        renderer.setScissor (0, 0, w, h);
+        this._origRender(scene, stereoCamera.cameraL);
+
+        renderer.setViewport(w, 0, w, h);
+        renderer.setScissor (w, 0, w, h);
+        this._origRender(scene, stereoCamera.cameraR);
+
+        renderer.setScissorTest(false);
+        renderer.setViewport(0, 0, size.x, size.y);
+
+        // Pass 2: apply barrel distortion and blit to screen
+        renderer.setRenderTarget(null);
+        renderer.autoClear = true;
+        this._origRender(this.distortScene, this.distortCam);
+      },
+
+      _onResize() {
+        if (!this.renderTarget) return;
+        const size = new THREE.Vector2();
+        this.el.renderer.getSize(size);
+        this.renderTarget.setSize(size.x, size.y);
+      },
+
+      activate(ipd, k1, k2) {
+        if (ipd && ipd > 0) { this.data.ipd = ipd; this.stereoCamera.eyeSep = ipd; }
+        if (k1 != null && this.distortMat) this.distortMat.uniforms.k1.value = k1;
+        if (k2 != null && this.distortMat) this.distortMat.uniforms.k2.value = k2;
+        this._active = true;
+      },
+
+      deactivate() {
+        this._active = false;
+        const renderer = this.el.renderer;
+        const size = new THREE.Vector2();
+        renderer.getSize(size);
+        renderer.setRenderTarget(null);
+        renderer.setViewport(0, 0, size.x, size.y);
+        renderer.setScissorTest(false);
+        renderer.autoClear = true;
+      }
+    });
+  </script>
+</head>
+<body>
+
+<!-- ── A-Frame scene ──────────────────────────────────────────────────── -->
+<a-scene
+  id="main-scene"
+  manual-stereo
+  vr-mode-ui="enabled: false"
+  device-orientation-permission-ui="enabled: true"
+  embedded
+>
+  <!-- Camera rig: look-controls drives head tracking via gyroscope -->
+  <a-entity id="rig" position="0 1.6 0">
+    <a-entity
+      id="cam"
+      camera="fov: 80"
+      look-controls="
+        pointerLockEnabled: false;
+        magicWindowTrackingEnabled: true;
+        touchEnabled: true
+      "
+      stereocam="eye: left"
+    >
+      <!-- Gaze reticle — same fuse timing as your CardboardReticlePointer.cs (1500ms) -->
+      <a-entity
+        cursor="fuse: true; fuseTimeout: 1500"
+        position="0 0 -1"
+        geometry="primitive: ring; radiusInner: 0.012; radiusOuter: 0.017"
+        material="color: white; shader: flat; opacity: 0.85"
+        raycaster="objects: .interactive"
+        animation__fusing="property: scale; startEvents: fusing; easing: easeInCubic; dur: 1500; from: 1 1 1; to: 0.1 0.1 0.1"
+        animation__mouseleave="property: scale; startEvents: mouseleave; dur: 150; to: 1 1 1"
+      ></a-entity>
+    </a-entity>
+  </a-entity>
+
+  <!-- ================================================================
+       YOUR SCENE CONTENT — put your thesis VR content below.
+       Add  stereo="eye:both"  to any entity you add so both eyes see it.
+       ================================================================ -->
+
+  <a-sky color="#0a0a18" stereo="eye: both"></a-sky>
+
+  <a-plane
+    position="0 0 0" rotation="-90 0 0"
+    width="30" height="30"
+    color="#111120"
+    stereo="eye: both"
+  ></a-plane>
+
+  <!-- Placeholder objects -->
+  <a-sphere
+    class="interactive"
+    position="0 1.5 -3" radius="0.5" color="#4a9eff"
+    stereo="eye: both"
+    animation="property: rotation; to: 0 360 0; loop: true; dur: 5000; easing: linear"
+    event-set__enter="_event: mouseenter; material.color: #88ccff"
+    event-set__leave="_event: mouseleave; material.color: #4a9eff"
+  ></a-sphere>
+
+  <a-box
+    class="interactive"
+    position="-2 0.5 -3" width="1" height="1" depth="1" color="#ff6b6b"
+    stereo="eye: both"
+    event-set__enter="_event: mouseenter; material.color: #ffaaaa"
+    event-set__leave="_event: mouseleave; material.color: #ff6b6b"
+  ></a-box>
+
+  <a-cylinder
+    class="interactive"
+    position="2 0.75 -3" radius="0.5" height="1.5" color="#6bff9e"
+    stereo="eye: both"
+    event-set__enter="_event: mouseenter; material.color: #aaffcc"
+    event-set__leave="_event: mouseleave; material.color: #6bff9e"
+  ></a-cylinder>
+
+  <!-- ================================================================ -->
+
+  <a-light type="ambient"     color="#334" intensity="0.8"></a-light>
+  <a-light type="directional" color="#fff" intensity="0.9" position="2 5 3"></a-light>
+
+</a-scene>
+
+<!-- divider between eyes -->
+<div id="divider"></div>
+
+<!-- ── Pre-VR overlay ────────────────────────────────────────────────── -->
+<div id="overlay">
+  <div class="step-label">Step 3 of 3</div>
+  <h1>Ready for VR</h1>
+
+  <div class="cal-row">
+    <span class="lbl">Calibrated DPI</span>
+    <span id="sum-dpi">—</span>
+  </div>
+  <div class="cal-row">
+    <span class="lbl">Viewer profile (IPD)</span>
+    <span id="sum-qr">—</span>
+  </div>
+
+  <p class="hint">
+    Insert your phone into your Cardboard viewer,<br>
+    then tap <strong>Enter VR</strong>.
+  </p>
+
+  <!-- Must be a direct user-gesture handler so device orientation permission fires -->
+  <button id="enter-btn" onclick="enterVR()">Enter VR</button>
+  <button id="recal-btn" onclick="window.location.href='ruler.html'">← Recalibrate</button>
+</div>
+
+<button id="exit-btn" onclick="exitVR()">Exit VR</button>
+
+<script>
+  // ── Read calibration data ──────────────────────────────────────────────
+  const savedDPI    = parseFloat(localStorage.getItem('savedDPI'))    || 0;
+  const savedParams = localStorage.getItem('cardboardParams')         || '';
+
+  // Default IPD 64mm; could be decoded from the Cardboard protobuf in savedParams
+  const IPD_METRES  = 0.064;
+
+  const dpiEl = document.getElementById('sum-dpi');
+  dpiEl.textContent = savedDPI > 0 ? savedDPI.toFixed(1) + ' PPI' : 'Not calibrated';
+  dpiEl.className   = savedDPI > 0 ? 'ok' : 'warn';
+
+  const qrEl = document.getElementById('sum-qr');
+  qrEl.textContent  = savedParams ? `Scanned ✓  (${(IPD_METRES * 1000).toFixed(0)} mm)` : `Default  (${(IPD_METRES * 1000).toFixed(0)} mm)`;
+  qrEl.className    = savedParams ? 'ok' : 'warn';
+
+  // ── Enter stereo mode ──────────────────────────────────────────────────
+  function enterVR() {
+    const scene      = document.getElementById('main-scene');
+    const stereoSys  = scene.systems['manual-stereo'];
+
+    // Request device-orientation permission on iOS 13+ (must be in user gesture)
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().catch(() => {});
+    }
+
+    document.getElementById('overlay').style.display  = 'none';
+    document.getElementById('exit-btn').style.display = 'block';
+    document.getElementById('divider').style.display  = 'block';
+
+    stereoSys.activate(IPD_METRES);
+  }
+
+  // ── Exit stereo mode ───────────────────────────────────────────────────
+  function exitVR() {
+    const scene     = document.getElementById('main-scene');
+    const stereoSys = scene.systems['manual-stereo'];
+    stereoSys.deactivate();
+
+    document.getElementById('exit-btn').style.display = 'none';
+    document.getElementById('divider').style.display  = 'none';
+    document.getElementById('overlay').style.display  = 'flex';
+  }
+
+  // ── Data collection helper ─────────────────────────────────────────────
+  // Call window.collectDataPoint('event-name', { any: 'payload' }) from
+  // your own scene scripts to log participant interactions.
+  window.collectDataPoint = function(eventType, payload) {
+    const log = JSON.parse(localStorage.getItem('thesisData') || '[]');
+    log.push({ t: Date.now(), dpi: savedDPI, ipd: IPD_METRES, event: eventType, ...payload });
+    localStorage.setItem('thesisData', JSON.stringify(log));
+  };
+</script>
+</body>
+</html>
