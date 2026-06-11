@@ -272,25 +272,67 @@
 
   // ── Process a detected QR string ──────────────────────────────────────
   function handleQR(data) {
-    // Accept http:// or https:// Cardboard URLs
-    if (!data.includes('google.com/cardboard/cfg')) return;
-
-    scanning = false;
-    stopCamera();
-
-    try {
-      const url    = new URL(data.startsWith('http') ? data : 'http://' + data);
-      const p      = url.searchParams.get('p');
-
-      if (!p) {
-        showError('QR found but missing viewer data', 'The URL has no "p" parameter. Try manual entry.');
-        return;
+    // ── Case 1: direct Cardboard URL ─────────────────────────────────────
+    if (data.includes('google.com/cardboard/cfg')) {
+      scanning = false;
+      stopCamera();
+      try {
+        const url = new URL(data.startsWith('http') ? data : 'http://' + data);
+        const p   = url.searchParams.get('p');
+        if (!p) {
+          showError('QR found but missing viewer data', 'The URL has no "p=" parameter. Try manual entry.');
+          return;
+        }
+        saveAndProceed(p, data);
+      } catch (e) {
+        showError('Could not parse QR URL', e.message);
       }
-
-      saveAndProceed(p, data);
-    } catch (e) {
-      showError('Could not parse QR URL', e.message);
+      return;
     }
+
+    // ── Case 2: goo.gl / g.co short URL (old Cardboard viewers) ─────────
+    // The short URL redirects to google.com/cardboard/cfg?p=… in the browser
+    // but we can't follow that redirect from JS due to CORS.
+    // Solution: stop scanning, show the link, ask user to open it and paste
+    // the full address-bar URL into the manual field.
+    if (data.includes('goo.gl') || data.includes('g.co/')) {
+      scanning = false;
+      stopCamera();
+
+      document.getElementById('scan-frame').style.display = 'none';
+      document.getElementById('ov-start').classList.add('hidden');
+      setStatus('scanning', 'Short URL found — follow the steps below.');
+
+      // Build a small instruction panel inside the camera area
+      const wrap = document.getElementById('camera-wrap-inner');
+      document.querySelector('.camera-wrap').innerHTML = `
+        <div style="padding:24px;display:flex;flex-direction:column;gap:14px;height:100%;">
+          <div style="font-size:13px;color:#aaa;line-height:1.6;">
+            Your viewer uses a shortened URL.<br>
+            To get the full Cardboard profile URL:
+          </div>
+          <ol style="font-size:13px;color:#ccc;line-height:2;padding-left:18px;">
+            <li>Tap the link below — it opens in a new tab</li>
+            <li>Copy the full URL from the address bar<br>
+                <span style="color:#888;font-size:11px;">(it will start with google.com/cardboard/cfg?p=…)</span></li>
+            <li>Paste it into the field below and tap <strong>Use this URL</strong></li>
+          </ol>
+          <a href="${encodeURI(data)}" target="_blank" rel="noopener"
+             style="display:block;padding:12px;border-radius:8px;
+                    background:#1a1a1a;border:1px solid #4a9eff;
+                    color:#4a9eff;font-size:12px;word-break:break-all;
+                    text-decoration:none;">
+            ${data}
+          </a>
+        </div>`;
+
+      document.getElementById('manual-wrap').classList.add('visible');
+      document.getElementById('manual-input').placeholder =
+        'Paste the google.com/cardboard/cfg?p=… URL here';
+      return;
+    }
+
+    // ── Any other QR code — keep scanning ────────────────────────────────
   }
 
   // ── Manual URL entry ───────────────────────────────────────────────────
