@@ -564,15 +564,29 @@
   }
 
   // ── Enter stereo mode ──────────────────────────────────────────────────
-  function enterVR() {
+  async function enterVR() {
+    // iOS 13+: must request gyroscope permission inside a user gesture and
+    // await the result before proceeding — otherwise orientation events won't
+    // fire even if the user grants access.
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const result = await DeviceOrientationEvent.requestPermission();
+        if (result !== 'granted') {
+          console.warn('[VR] Device orientation permission denied — head tracking will not work.');
+        }
+      } catch (e) {
+        console.warn('[VR] Device orientation permission error:', e);
+      }
+    }
+
     const scene     = document.getElementById('main-scene');
     const stereoSys = scene.systems['manual-stereo'];
     const cam       = document.getElementById('cam');
 
-    // iOS 13+: request gyroscope permission inside a user gesture
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      DeviceOrientationEvent.requestPermission().catch(() => {});
+    if (!stereoSys) {
+      console.error('[VR] manual-stereo system not ready yet — try again.');
+      return;
     }
 
     // Apply FOV from viewer profile (vertical = upper + lower degrees)
