@@ -328,12 +328,13 @@
        Add  stereo="eye:both"  to any entity you add so both eyes see it.
        ================================================================ -->
 
-  <a-sky color="#0a0a18" stereo="eye: both"></a-sky>
+  <a-sky color="#87CEEB" stereo="eye: both"></a-sky>
 
+  <!-- Ground -->
   <a-plane
     position="0 0 0" rotation="-90 0 0"
-    width="30" height="30"
-    color="#111120"
+    width="40" height="40"
+    color="#7cba6a"
     stereo="eye: both"
   ></a-plane>
 
@@ -349,24 +350,28 @@
 
   <a-box
     class="interactive"
-    position="-2 0.5 -3" width="1" height="1" depth="1" color="#ff6b6b"
+    position="-2 0.5 -3" width="1" height="1" depth="1" color="#e05a5a"
     stereo="eye: both"
-    event-set__enter="_event: mouseenter; material.color: #ffaaaa"
-    event-set__leave="_event: mouseleave; material.color: #ff6b6b"
+    event-set__enter="_event: mouseenter; material.color: #ff9999"
+    event-set__leave="_event: mouseleave; material.color: #e05a5a"
   ></a-box>
 
   <a-cylinder
     class="interactive"
-    position="2 0.75 -3" radius="0.5" height="1.5" color="#6bff9e"
+    position="2 0.75 -3" radius="0.5" height="1.5" color="#4ecb71"
     stereo="eye: both"
-    event-set__enter="_event: mouseenter; material.color: #aaffcc"
-    event-set__leave="_event: mouseleave; material.color: #6bff9e"
+    event-set__enter="_event: mouseenter; material.color: #90ffb0"
+    event-set__leave="_event: mouseleave; material.color: #4ecb71"
   ></a-cylinder>
 
   <!-- ================================================================ -->
 
-  <a-light type="ambient"     color="#334" intensity="0.8"></a-light>
-  <a-light type="directional" color="#fff" intensity="0.9" position="2 5 3"></a-light>
+  <!-- Hemisphere light: sky colour from above, warm ground bounce from below -->
+  <a-light type="hemisphere" color="#ddeeff" ground-color="#b5d9a0" intensity="1.2"></a-light>
+  <!-- Key light: sun from upper-right -->
+  <a-light type="directional" color="#fff8e7" intensity="1.4" position="3 8 2"></a-light>
+  <!-- Soft fill from the left to reduce harsh shadows -->
+  <a-light type="directional" color="#c8dff7" intensity="0.4" position="-4 3 -2"></a-light>
 
 </a-scene>
 
