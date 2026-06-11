@@ -7,18 +7,340 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+
+    a-scene {
+      position: fixed; inset: 0;
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    #enter-btn {
+      position: fixed; bottom: 16px; right: 16px; z-index: 200;
+      padding: 10px 18px; border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.3);
+      background: rgba(0,0,0,0.65); color: #fff;
+      font-size: 14px; font-family: -apple-system, sans-serif;
+      cursor: pointer;
+    }
+    #enter-btn:active { opacity: 0.75; }
+
+    #exit-btn {
+      position: fixed; bottom: 16px; right: 16px; z-index: 200;
+      padding: 10px 18px; border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.2);
+      background: rgba(0,0,0,0.65); color: #fff;
+      font-size: 14px; font-family: -apple-system, sans-serif;
+      cursor: pointer; display: none;
+    }
+
+    #divider {
+      position: fixed; top: 0; bottom: 0; left: 50%;
+      width: 2px; background: #111;
+      display: none; z-index: 50;
+      transform: translateX(-50%);
+    }
   </style>
 
   <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/aframe-stereo-component/dist/aframe-stereo-component.min.js"></script>
+
+  <script>
+    AFRAME.registerSystem('manual-stereo', {
+      schema: {
+        ipd: { type: 'number', default: 0.064 },
+        k1:  { type: 'number', default: 0.441 },
+        k2:  { type: 'number', default: 0.156 },
+      },
+
+      init() {
+        this._active      = false;
+        this._origRender  = null;
+        this.stereoCamera = new THREE.StereoCamera();
+        this.renderTarget = null;
+        this.distortScene = null;
+        this.distortCam   = null;
+        this.distortMat   = null;
+
+        this.el.addEventListener('loaded', () => {
+          this._buildDistortionPass();
+          this._patchRenderer();
+        });
+
+        window.addEventListener('resize', () => this._onResize());
+      },
+
+      _buildDistortionPass() {
+        const renderer = this.el.renderer;
+        const size     = new THREE.Vector2();
+        renderer.getSize(size);
+
+        this.renderTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+
+        const vert = `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `;
+
+        const frag = `
+          precision mediump float;
+          uniform sampler2D tDiffuse;
+          uniform float k1;
+          uniform float k2;
+          varying vec2 vUv;
+
+          vec2 barrelUV(vec2 uv, vec2 lensCenter) {
+            vec2 p = uv - lensCenter;
+            p.x *= 2.0;
+            float r2 = dot(p, p);
+            float r4 = r2 * r2;
+            float dist = 1.0 + k1 * r2 + k2 * r4;
+            p *= dist;
+            p.x /= 2.0;
+            return p + lensCenter;
+          }
+
+          void main() {
+            vec2 uv = vUv;
+            vec2 s;
+
+            if (uv.x < 0.5) {
+              s = barrelUV(uv, vec2(0.25, 0.5));
+              if (s.x < 0.0 || s.x > 0.5 || s.y < 0.0 || s.y > 1.0) {
+                gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
+              }
+            } else {
+              s = barrelUV(uv, vec2(0.75, 0.5));
+              if (s.x < 0.5 || s.x > 1.0 || s.y < 0.0 || s.y > 1.0) {
+                gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return;
+              }
+            }
+
+            gl_FragColor = texture2D(tDiffuse, s);
+          }
+        `;
+
+        this.distortMat = new THREE.ShaderMaterial({
+          uniforms: {
+            tDiffuse: { value: this.renderTarget.texture },
+            k1:       { value: this.data.k1 },
+            k2:       { value: this.data.k2 },
+          },
+          vertexShader:   vert,
+          fragmentShader: frag,
+        });
+
+        const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.distortMat);
+        this.distortScene = new THREE.Scene();
+        this.distortScene.add(quad);
+        this.distortCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      },
+
+      _patchRenderer() {
+        const renderer = this.el.renderer;
+        const self     = this;
+        const orig     = renderer.render.bind(renderer);
+        this._origRender = orig;
+
+        renderer.render = function(scene, camera) {
+          if (!self._active) { orig(scene, camera); return; }
+          self._drawStereo(scene, camera);
+        };
+      },
+
+      _drawStereo(scene, camera) {
+        const renderer     = this.el.renderer;
+        const stereoCamera = this.stereoCamera;
+
+        stereoCamera.eyeSep = this.data.ipd;
+        stereoCamera.update(camera);
+
+        const size = new THREE.Vector2();
+        renderer.getSize(size);
+        const w = Math.floor(size.x / 2);
+        const h = size.y;
+
+        renderer.setRenderTarget(this.renderTarget);
+        renderer.autoClear = false;
+        renderer.clear();
+        renderer.setScissorTest(true);
+
+        renderer.setViewport(0, 0, w, h);
+        renderer.setScissor (0, 0, w, h);
+        this._origRender(scene, stereoCamera.cameraL);
+
+        renderer.setViewport(w, 0, w, h);
+        renderer.setScissor (w, 0, w, h);
+        this._origRender(scene, stereoCamera.cameraR);
+
+        renderer.setScissorTest(false);
+        renderer.setViewport(0, 0, size.x, size.y);
+
+        renderer.setRenderTarget(null);
+        renderer.autoClear = true;
+        this._origRender(this.distortScene, this.distortCam);
+      },
+
+      _onResize() {
+        if (!this.renderTarget) return;
+        const size = new THREE.Vector2();
+        this.el.renderer.getSize(size);
+        this.renderTarget.setSize(size.x, size.y);
+      },
+
+      activate(ipd, k1, k2) {
+        if (ipd && ipd > 0) { this.data.ipd = ipd; this.stereoCamera.eyeSep = ipd; }
+        if (k1 != null && this.distortMat) this.distortMat.uniforms.k1.value = k1;
+        if (k2 != null && this.distortMat) this.distortMat.uniforms.k2.value = k2;
+        this._active = true;
+      },
+
+      deactivate() {
+        this._active = false;
+        const renderer = this.el.renderer;
+        const size = new THREE.Vector2();
+        renderer.getSize(size);
+        renderer.setRenderTarget(null);
+        renderer.setViewport(0, 0, size.x, size.y);
+        renderer.setScissorTest(false);
+        renderer.autoClear = true;
+      }
+    });
+  </script>
+
+  <script>
+    function decodeCardboardParams(base64urlStr) {
+      const DEFAULTS = {
+        vendor: '', model: '',
+        screenToLensDist: 0.042,
+        interLensDist:    0.064,
+        trayToLensDist:   0.035,
+        distortionCoeffs: [0.441, 0.156],
+        fov: { outer: 50, inner: 50, upper: 50, lower: 50 }
+      };
+
+      if (!base64urlStr) return DEFAULTS;
+
+      const out = { ...DEFAULTS, distortionCoeffs: [] };
+
+      try {
+        const b64 = base64urlStr.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = b64 + '='.repeat((4 - b64.length % 4) % 4);
+        const bin = atob(pad);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+
+        _parseProto(buf, 0, buf.length, out);
+
+        if (out.distortionCoeffs.length === 0)
+          out.distortionCoeffs = DEFAULTS.distortionCoeffs;
+      } catch (e) {
+        console.warn('[Cardboard] QR decode failed, using defaults:', e);
+        return DEFAULTS;
+      }
+
+      return out;
+    }
+
+    function _parseProto(buf, start, end, out) {
+      let p = start;
+
+      function varint() {
+        let v = 0, s = 0;
+        while (p < end) {
+          const b = buf[p++];
+          v |= (b & 0x7f) << s;
+          if (!(b & 0x80)) break;
+          s += 7;
+        }
+        return v >>> 0;
+      }
+
+      function float32() {
+        const v = new DataView(buf.buffer, buf.byteOffset + p, 4).getFloat32(0, true);
+        p += 4; return v;
+      }
+
+      function str(n) {
+        const v = new TextDecoder().decode(buf.subarray(p, p + n));
+        p += n; return v;
+      }
+
+      while (p < end) {
+        const tag = varint();
+        const fn  = tag >> 3;
+        const wt  = tag & 0x7;
+
+        if (fn === 1 && wt === 2) { out.vendor            = str(varint());   continue; }
+        if (fn === 2 && wt === 2) { out.model             = str(varint());   continue; }
+        if (fn === 3 && wt === 5) { out.screenToLensDist  = float32();       continue; }
+        if (fn === 4 && wt === 5) { out.interLensDist     = float32();       continue; }
+        if (fn === 5 && wt === 0) { out.verticalAlignment = varint();        continue; }
+        if (fn === 6 && wt === 5) { out.trayToLensDist    = float32();       continue; }
+        if (fn === 10 && wt === 0){ out.hasMagnet         = !!varint();      continue; }
+
+        if (fn === 7) {
+          if (wt === 5) {
+            out.distortionCoeffs.push(float32());
+          } else if (wt === 2) {
+            const len = varint(); const stop = p + len;
+            while (p < stop) out.distortionCoeffs.push(float32());
+          }
+          continue;
+        }
+
+        if (fn === 8 && wt === 2) {
+          const len = varint();
+          out.fov = _parseFov(buf, p, p + len);
+          p += len;
+          continue;
+        }
+
+        if      (wt === 0) varint();
+        else if (wt === 1) p += 8;
+        else if (wt === 2) p += varint();
+        else if (wt === 5) p += 4;
+      }
+    }
+
+    function _parseFov(buf, start, end) {
+      const fov = { outer: 50, inner: 50, upper: 50, lower: 50 };
+      let p = start;
+      while (p < end) {
+        const tag = buf[p++];
+        const fn  = tag >> 3;
+        if ((tag & 0x7) !== 5) { p += 4; continue; }
+        const v = new DataView(buf.buffer, buf.byteOffset + p, 4).getFloat32(0, true);
+        p += 4;
+        if (fn === 1) fov.outer = v;
+        if (fn === 2) fov.inner = v;
+        if (fn === 3) fov.upper = v;
+        if (fn === 4) fov.lower = v;
+      }
+      return fov;
+    }
+  </script>
 </head>
 <body>
 
-<a-scene>
+<a-scene
+  id="main-scene"
+  manual-stereo
+  vr-mode-ui="enabled: false"
+  device-orientation-permission-ui="enabled: true"
+  embedded
+>
   <a-entity id="rig" position="0 1.6 0">
     <a-entity
       id="cam"
       camera="fov: 80"
       look-controls="pointerLockEnabled: false; magicWindowTrackingEnabled: true; touchEnabled: true"
+      stereocam="eye: left"
     >
       <a-entity
         cursor="fuse: true; fuseTimeout: 1500"
@@ -32,17 +354,19 @@
     </a-entity>
   </a-entity>
 
-  <a-sky color="#87CEEB"></a-sky>
+  <a-sky color="#87CEEB" stereo="eye: both"></a-sky>
 
   <a-plane
     position="0 0 0" rotation="-90 0 0"
     width="40" height="40"
     color="#7cba6a"
+    stereo="eye: both"
   ></a-plane>
 
   <a-sphere
     class="interactive"
     position="0 1.5 -3" radius="0.5" color="#4a9eff"
+    stereo="eye: both"
     animation="property: rotation; to: 0 360 0; loop: true; dur: 5000; easing: linear"
     event-set__enter="_event: mouseenter; material.color: #88ccff"
     event-set__leave="_event: mouseleave; material.color: #4a9eff"
@@ -51,6 +375,7 @@
   <a-box
     class="interactive"
     position="-2 0.5 -3" width="1" height="1" depth="1" color="#e05a5a"
+    stereo="eye: both"
     event-set__enter="_event: mouseenter; material.color: #ff9999"
     event-set__leave="_event: mouseleave; material.color: #e05a5a"
   ></a-box>
@@ -58,6 +383,7 @@
   <a-cylinder
     class="interactive"
     position="2 0.75 -3" radius="0.5" height="1.5" color="#4ecb71"
+    stereo="eye: both"
     event-set__enter="_event: mouseenter; material.color: #90ffb0"
     event-set__leave="_event: mouseleave; material.color: #4ecb71"
   ></a-cylinder>
@@ -67,5 +393,48 @@
   <a-light type="directional" color="#c8dff7" intensity="0.4" position="-4 3 -2"></a-light>
 </a-scene>
 
+<div id="divider"></div>
+
+<button id="enter-btn" onclick="enterVR()">⬡ Enter VR</button>
+<button id="exit-btn" onclick="exitVR()">Exit VR</button>
+
+<script>
+  const qrParams = decodeCardboardParams(localStorage.getItem('cardboardParams') || '');
+
+  async function enterVR() {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        await DeviceOrientationEvent.requestPermission();
+      } catch (e) {}
+    }
+
+    const scene     = document.getElementById('main-scene');
+    const stereoSys = scene.systems['manual-stereo'];
+    const cam       = document.getElementById('cam');
+
+    const vFov = qrParams.fov.upper + qrParams.fov.lower;
+    if (vFov > 0) cam.setAttribute('camera', 'fov', vFov);
+
+    document.getElementById('enter-btn').style.display = 'none';
+    document.getElementById('exit-btn').style.display  = 'block';
+    document.getElementById('divider').style.display   = 'block';
+
+    stereoSys.activate(
+      qrParams.interLensDist,
+      qrParams.distortionCoeffs[0],
+      qrParams.distortionCoeffs[1]
+    );
+  }
+
+  function exitVR() {
+    const stereoSys = document.getElementById('main-scene').systems['manual-stereo'];
+    stereoSys.deactivate();
+
+    document.getElementById('enter-btn').style.display = 'block';
+    document.getElementById('exit-btn').style.display  = 'none';
+    document.getElementById('divider').style.display   = 'none';
+  }
+</script>
 </body>
 </html>
